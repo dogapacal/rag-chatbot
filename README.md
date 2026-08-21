@@ -27,5 +27,23 @@ A fully local Retrieval-Augmented Generation (RAG) system that allows users to u
 
 ### 1. Prerequisites
 Ensure you have **Ollama** installed and running on your system:
-```bash
 ollama serve
+
+Pull the required base models:
+ollama pull llama3
+ollama pull nomic-embed-text
+
+### 2. Clone the Repository
+git clone https://github.com/dogapacal/rag-chatbot.git
+cd rag-chatbot
+
+### 3. Install Dependencies
+pip install -r requirements.txt
+
+### 4. Run the Application
+streamlit run main.py
+
+---
+
+## 📄 License
+This project is open-source and available under the MIT License.
