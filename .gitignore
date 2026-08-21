@@ -13,3 +13,5 @@ temp_*
 venv/
 env/
 .env
+test_baglanti.py
+Modelfile
