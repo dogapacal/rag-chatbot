@@ -1,0 +1,15 @@
+# Python önbellek dosyaları
+__pycache__/
+*.pyc
+
+# Qdrant Veritabanı ve Yerel Veriler
+qdrant_db/
+
+# Geçici dosyalar ve PDF'ler
+temp_*
+*.pdf
+
+# Sanal ortam
+venv/
+env/
+.env
