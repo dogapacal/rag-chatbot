@@ -15,3 +15,9 @@ env/
 .env
 test_baglanti.py
 Modelfile
+
+uploads/
+paper_profiles/
+article_data/
+frontend/node_modules/
+frontend/dist/
