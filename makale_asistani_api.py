@@ -1091,6 +1091,33 @@ def soru_sor_sync(istek: SoruIstegi) -> Dict[str, Any]:
         "out_of_context": is_out_of_context
     }
 
+def pdf_sayfalari_ve_parcalari(dosya_yolu, dosya_adi, dosya_id):
+    doc = fitz.open(str(dosya_yolu))
+    pages = []
+    chunks = []
+    
+    for sayfa_idx in range(len(doc)):
+        sayfa = doc[sayfa_idx]
+        sayfa_no = sayfa_idx + 1
+        metin = sayfa.get_text().encode("utf-8", "ignore").decode("utf-8")
+        pages.append({"sayfa": sayfa_no, "metin": metin})
+        
+        # Metni yaklaşık 500'er karakterlik bloklara böl
+        chunk_boyutu = 500
+        adim = 400  # 100 karakter örtüşme (overlap)
+        for i in range(0, len(metin), adim):
+            parca_metin = metin[i:i + chunk_boyutu].strip()
+            if parca_metin:
+                chunks.append({
+                    "metin": parca_metin,
+                    "sayfa": sayfa_no,
+                    "dosya_adi": dosya_adi,
+                    "dosya_id": dosya_id
+                })
+                
+    doc.close()
+    return pages, chunks
+
 @app.post("/upload")
 async def dosya_yukle(file: UploadFile = File(...)):
     try:
