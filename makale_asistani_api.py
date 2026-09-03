@@ -16,12 +16,20 @@ from langchain_qdrant import QdrantVectorStore
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, FieldCondition, Filter, MatchAny, MatchValue, VectorParams
+from openai import OpenAI
 
 # --- .env Dosyasını Okuma ve API Anahtarını Yükleme ---
 from dotenv import load_dotenv
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # --------------------------------------------------------
+
+# --- vLLM Local CPU İstemcisi ---
+vllm_client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="vllm-local",
+)
+# ---------------------------------
 
 try:
     from langchain_ollama import OllamaEmbeddings, OllamaLLM
@@ -80,8 +88,17 @@ import os
 
 def llm_metni(prompt: str, model: str = "local") -> str:
     try:
+        # Eğer arayüzden "vLLM Qwen 0.5B" seçildiyse vLLM CPU sunucusunu kullan
+        if model == "vllm":
+            completion = vllm_client.chat.completions.create(
+                model="Qwen/Qwen2.5-0.5B-Instruct",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+            )
+            return temizle_model_cevabi(completion.choices[0].message.content)
+
         # Eğer arayüzden "Yerel Qwen 7B" seçildiyse mevcut Ollama altyapısını kullan
-        if model == "local":
+        elif model == "local":
             return temizle_model_cevabi(llm.invoke(prompt))
         
         # Eğer arayüzden bulut modellerinden biri seçildiyse OpenRouter'a git
@@ -105,7 +122,7 @@ def llm_metni(prompt: str, model: str = "local") -> str:
                 headers=headers,
                 json=data,
                 timeout=120
-)
+            )
             
             if response.status_code == 200:
                 response_json = response.json()
