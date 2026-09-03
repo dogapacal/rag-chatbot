@@ -120,6 +120,8 @@
           <form @submit.prevent="sendMessage" class="input-box">
             <select v-model="selectedModel" class="model-select" :disabled="isThinking || isUploading" title="Yapay zeka modelini seçin">
               <option v-for="model in availableModels" :key="model.id" :value="model.id">{{ model.name }}</option>
+            <!-- vLLM seçeneği buraya eklendi -->
+              <option value="vllm">Qwen 2.5 0.5B (vLLM)</option>
             </select>
             <label class="attach-btn" :class="{disabled:isUploading}" title="PDF Makale Yükle"><input type="file" accept=".pdf" @change="handleFileUpload" :disabled="isUploading" multiple hidden /><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.48-8.48"/></svg></label>
             <input v-model="userInput" type="text" placeholder="Makale hakkında soru sorun..." :disabled="isThinking || isUploading" />
@@ -138,7 +140,7 @@ import { marked } from 'marked'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 
-const API_BASE='http://127.0.0.1:8000'
+const API_BASE='http://127.0.0.1:8080'
 const STORAGE_KEY_HISTORY='makale_asistani_history'
 const STORAGE_KEY_THEME='makale_theme_v2'
 marked.setOptions({breaks:true,gfm:true})
@@ -429,7 +431,8 @@ const sendMessage=async()=>{
   abortController.value=new AbortController()
   try{
     const currentPrimary=currentThemeObj.value.vars['--primary']
-    const response=await fetch(`${API_BASE}/ask`,{method:'POST',headers:{'Content-Type':'application/json','Cache-Control':'no-cache'},cache:'no-store',body:JSON.stringify({question:query,dosya_adlari:activeFiles.value,theme_color:currentPrimary,model:selectedModel.value}),signal:abortController.value.signal})
+    const fileNames = (activeFiles.value || []).map(f => typeof f === 'object' ? (f.name || f.dosya_adi || f.filename || '') : f).filter(Boolean)
+    const response=await fetch(`${API_BASE}/ask`,{method:'POST',headers:{'Content-Type':'application/json','Cache-Control':'no-cache'},cache:'no-store',body:JSON.stringify({question:query,dosya_adlari:fileNames,dosya_adi:fileNames[0]||null,theme_color:currentPrimary,model:selectedModel.value}),signal:abortController.value.signal})
     currentLiveThoughts.value='Yanıt hazırlanıyor...'
     if(!response.ok){const rawError=await response.text();let detail=rawError;try{const errorData=JSON.parse(rawError);detail=errorData.detail||errorData.error||rawError}catch{}throw new Error(`Backend ${response.status}: ${detail}`)}
     const rawText=await response.text()
