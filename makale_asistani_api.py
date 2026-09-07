@@ -26,7 +26,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # --- vLLM Local CPU İstemcisi ---
 vllm_client = OpenAI(
-    base_url="http://localhost:8000/v1",
+    base_url="http://localhost:8001/v1",
     api_key="vllm-local",
 )
 # ---------------------------------
@@ -87,33 +87,58 @@ import requests
 import os
 
 def llm_metni(prompt: str, model: str = "local") -> str:
+    system_instruction = (
+        "Sen akademik makaleleri analiz eden uzman bir asistansın. "
+        "Kullanıcıya KESİNLİKLE VE HER ZAMAN TÜRKÇE yanıt vereceksin. "
+        "Analiz ettiğin makale veya bağlam metni İngilizce olsa bile, cevabının tamamını akıcı, "
+        "anlaşılır ve profesyonel Türkçe ile yaz. İngilizce cümle kurma."
+    )
+    
     try:
-        # Eğer arayüzden "vLLM Qwen 0.5B" seçildiyse vLLM CPU sunucusunu kullan
+        # 1. vLLM Qwen 0.5B
         if model == "vllm":
+            vllm_prompt = re.sub(
+                r"Sen teknik ve mühendislik makalelerini inceleyen bir araştırma asistanısın\..*?CONTEXT:",
+                "Makaleye göre soruyu cevapla. Türkçe cevap ver. Doğrudan ve kısa cevapla.\n\nCONTEXT:",
+                prompt,
+                flags=re.S
+            )
+            vllm_prompt = re.sub(
+                r"\nDİKKAT:.*?CEVAP \(TÜRKÇE\):",
+                "\nCEVAP:",
+                vllm_prompt,
+                flags=re.S
+            )
+
             completion = vllm_client.chat.completions.create(
                 model="Qwen/Qwen2.5-0.5B-Instruct",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": vllm_prompt}],
                 temperature=0.0,
+                max_tokens=150,
             )
             return temizle_model_cevabi(completion.choices[0].message.content)
 
-        # Eğer arayüzden "Yerel Qwen 7B" seçildiyse mevcut Ollama altyapısını kullan
+        # 2. Yerel Qwen 7B (Ollama)
         elif model == "local":
-            return temizle_model_cevabi(llm.invoke(prompt))
+            # Ollama invoke doğrudan string aldığı için sistem talimatını en başa açık bir etiketle gömüyoruz
+            guclendirilmis_prompt = f"### SYSTEM TALİMATI:\n{system_instruction}\n\n{prompt}"
+            return temizle_model_cevabi(llm.invoke(guclendirilmis_prompt))
         
-        # Eğer arayüzden bulut modellerinden biri seçildiyse OpenRouter'a git
+        # 3. Bulut Modelleri (OpenRouter)
         else:
-            # API anahtarı değişken olmadan doğrudan header içine gömüldü
             headers = {
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json"
             }
             if model == "meta-llama/llama-3.1-8b-instruct:free":
-               model = "meta-llama/llama-3.1-8b-instruct:free"
+                model = "meta-llama/llama-3.1-8b-instruct:free"
 
             data = {
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": prompt}
+                ],
                 "temperature": 0.0
             }
             
@@ -135,7 +160,7 @@ def llm_metni(prompt: str, model: str = "local") -> str:
                 
     except Exception as e:
         return f"Sistem Hatası: {str(e)}"
-
+    
 def dosya_guvenli_adi(filename: str) -> str:
     value = os.path.basename(filename or "makale.pdf")
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip()
@@ -358,7 +383,24 @@ def soru_turkce_mi(question: str) -> bool:
     return bool(re.search(r"[çğıöşü]", question.lower())) or any(item in q.split() for item in turkish_markers)
 
 def bilingual_queries(question: str) -> List[str]:
-    return [question]
+    queries = [question]
+
+    if soru_turkce_mi(question):
+        try:
+            translation_prompt = f"""Aşağıdaki Türkçe akademik soruyu, anlamını değiştirmeden İngilizceye çevir.
+Bu çeviri yalnızca İngilizce bir akademik makalede ilgili bölümleri aramak için kullanılacaktır.
+Sadece İngilizce çeviriyi yaz.
+
+SORU:
+{question}"""
+            english_query = llm_metni(translation_prompt, model="local").strip()
+
+            if english_query and english_query.lower() != question.lower():
+                queries.append(english_query)
+        except Exception:
+            pass
+
+    return queries
 
 def lexical_rank(chunks: Sequence[Dict[str, Any]], queries: Sequence[str], limit: int = 50) -> List[str]:
     wanted = {token for query in queries for token in tokens(query)}
@@ -512,7 +554,7 @@ def ingilizce_cumle_var_mi(text: str) -> bool:
     hits = sum(any(re.search(pattern, line, flags=re.I) for pattern in patterns) for line in lines)
     return hits >= 1 or sum(len(re.findall(r"\b(the|this|that|with|from|which|were|was|used|study|paper|results)\b", text, flags=re.I)) for _ in [0]) >= 4
 
-def turkce_cevap_duzelt(question: str, context: str, answer: str, force: bool = False) -> str:
+def turkce_cevap_duzelt(question: str, context: str, answer: str, force: bool = False, model: str = "local") -> str:
     if not answer or (not force and not ingilizce_cumle_var_mi(answer)):
         return answer
     prompt = f"""Aşağıdaki akademik cevabı anlamını değiştirmeden doğal, düzgün ve anlaşılır TÜRKÇE ile yeniden yaz.
@@ -535,19 +577,20 @@ CEVAP:
 {answer}
 
 SADECE DÜZELTİLMİŞ CEVABI VER."""
-    corrected = llm_metni(prompt)
+    corrected = llm_metni(prompt, model=model)
     return corrected or answer
 
 def answer_from_evidence(question: str, context: str, task: str = "", model: str = "local") -> str:
     prompt = f"""Sen teknik ve mühendislik makalelerini inceleyen bir araştırma asistanısın.
 
 TEMEL YAZIM PRENSİPLERİ (HER ALAN İÇİN GEÇERLİ):
-1. ÇEVİRİ DEĞİL, ANLATIM YAP: Verilen İngilizce parçaları kelime kelime çevirmeye çalışma. Önce teknik mantığı anla, ardından bir mühendisin ekip arkadaşına anlatacağı gibi doğal, modern ve akıcı bir Türkçe ile ifade et.
-2. DİL VE TERİM STANDARDI:
-   - Eski, ağdalı veya yapay sözlük karşılıkları (artalan, kestirim, sadakat vb.) yerine modern mühendislikte kullanılan yalın karşılıkları (arka plan, tahmin/hesaplama, doğruluk vb.) seç.
-   - Türkçede doğal bir karşılığı bulunmayan veya zorlama duran özel teknik terimleri (örn. 'watershed', 'convolution', 'transformer') zorla Türkçeleştirmek yerine doğrudan kabul görmüş teknik haliyle kullan.
-   - Parantez içinde gereksiz iki dilli tekrarlar (ör. "kelime (word)") yapma.
-3. BAĞLAM VE GÜVENİLİRLİK:
+1. KESİNLİKLE TÜRKÇE YANIT VER: Makale metni İngilizce olsa dahi, cevabının tamamını Türkçe yaz. İngilizce cümle kurma.
+2. ÇEVİRİ DEĞİL, ANLATIM YAP: Verilen İngilizce parçaları kelime kelime çevirmeye çalışma. Önce teknik mantığı anla, ardından bir mühendisin ekip arkadaşına anlatacağı gibi doğal, modern ve akıcı bir Türkçe ile ifade et.
+3. DİL VE TERİM STANDARDI:
+   - Eski, ağdalı veya yapay sözlük karşılıkları yerine modern mühendislikte kullanılan yalın karşılıkları seç.
+   - Türkçede doğal karşılığı olmayan teknik terimleri ('watershed', 'convolution', 'transformer' vb.) doğrudan kullanabilirsin.
+   - Parantez içinde gereksiz iki dilli tekrarlar yapma.
+4. BAĞLAM VE GÜVENİLİRLİK:
    - Yalnızca CONTEXT içindeki bilgilere dayan, dışarıdan uydurma bilgi ekleme.
    - Metne [s. 1] gibi atıf etiketleri ekleme.
 
@@ -560,13 +603,22 @@ CONTEXT:
 SORU:
 {question}
 
-SADECE DOĞAL, ANLAŞILIR VE PROFESYONEL TÜRKÇE İLE CEVAP VER:"""
+DİKKAT: Makale İngilizce olsa bile yanıtını KESİNLİKLE TÜRKÇE olarak yaz.
+CEVAP (TÜRKÇE):"""
     
     draft = llm_metni(prompt, model=model)
     if not draft:
         return "Verilen makalelerden geçerli bir sonuç üretilemedi."
-    return draft
-def multi_document_answer(question: str, context: str, task: str = "") -> str:
+        
+    # Model İngilizceye kaçtıysa Türkçeye zorla
+    return turkce_cevap_duzelt(
+    question,
+    context,
+    draft,
+    force=False,
+    model=model
+)
+def multi_document_answer(question: str, context: str, task: str = "", model: str = "local") -> str:
     prompt = f"""Sen birden fazla akademik makaleyi birlikte analiz eden araştırma asistanısın.
 
 Kurallar:
@@ -591,10 +643,16 @@ SORU:
 {question}
 
 SADECE TÜRKÇE CEVAP VER."""
-    draft = llm_metni(prompt)
+    draft = llm_metni(prompt, model=model)
     if not draft:
         return "Verilen makalelerden geçerli bir karşılaştırma veya sentez üretilemedi."
-    return turkce_cevap_duzelt(question, context, draft, force=True)
+    return turkce_cevap_duzelt(
+    question,
+    context,
+    draft,
+    force=True,
+    model=model
+)
 
 # ============================================================
 # METADATA
@@ -718,15 +776,31 @@ def tum_makale_context(chunks: Sequence[Dict[str, Any]], max_chars: int = 22000)
     text = context_from_chunks(selected, per_chunk=max(1000, max_chars // max(len(selected), 1)))
     return text[:max_chars], sorted({int(c["metadata"]["page"]) for c in selected})
 
-def ozel_bolum_yaniti(question: str, route: Dict[str, Any], profile: Dict[str, Any], chunks: Sequence[Dict[str, Any]]) -> Tuple[Optional[str], List[int]]:
+def ozel_bolum_yaniti(
+    question: str,
+    route: Dict[str, Any],
+    profile: Dict[str, Any],
+    chunks: Sequence[Dict[str, Any]],
+    model: str = "local"
+) -> Tuple[Optional[str], List[int]]:
     if route["intro_first"] and profile.get("introduction_first_sentence"):
         pages = list(profile.get("introduction_pages") or [1])
         context = f"[Kaynak: s. {pages[0]} | Giriş]\n{profile['introduction_first_sentence']}"
-        return answer_from_evidence(question, context, "Giriş bölümünün ilk cümlesini anlamını koruyarak Türkçe açıkla."), pages
+        return answer_from_evidence(
+            question,
+            context,
+            "Giriş bölümünün ilk cümlesini anlamını koruyarak Türkçe açıkla.",
+            model=model
+        ), pages
     if route["abstract"] and profile.get("abstract"):
         pages = list(profile.get("abstract_pages") or [])
         context = "\n".join(f"[Kaynak: s. {p} | Özet]" for p in pages) + "\n" + profile["abstract"]
-        return answer_from_evidence(question, context, "Makalenin abstract bölümünü Türkçe anlat."), pages
+        return answer_from_evidence(
+            question,
+            context,
+            "Makalenin abstract bölümünü Türkçe anlat.",
+         model=model
+        ), pages
     if route["summary"]:
         context, pages = ozet_context(profile, chunks)
         if context:
@@ -734,11 +808,17 @@ def ozel_bolum_yaniti(question: str, route: Dict[str, Any], profile: Dict[str, A
                 question,
                 context,
                 "Makalenin genel özetini çıkar. Konuyu, amacı, kullanılan yöntemi, veri setini/deney düzenini, önemli bulguları, temel katkıları ve sonucunu mümkün olduğunca eksiksiz ama anlaşılır biçimde birleştir.",
+                model=model
             ), pages
     if route["conclusion"] and profile.get("conclusion"):
         pages = list(profile.get("conclusion_pages") or [])
         context = "\n".join(f"[Kaynak: s. {p} | Sonuç]" for p in pages) + "\n" + profile["conclusion"]
-        return answer_from_evidence(question, context, "Makalenin sonuç bölümünü Türkçe olarak açıkla; sonuç bölümündeki temel bulguları ve çıkarımları belirt."), pages
+        return answer_from_evidence(
+            question,
+            context,
+            "Makalenin sonuç bölümünü Türkçe olarak açıkla; sonuç bölümündeki temel bulguları ve çıkarımları belirt.",
+            model=model
+        ), pages
     if route["references"] and profile.get("references"):
         pages = list(profile.get("references_pages") or [])
         context = "\n".join(f"[Kaynakça: s. {p}]" for p in pages) + "\n" + profile["references"]
@@ -792,7 +872,7 @@ def formula_context(formulas: Sequence[Dict[str, Any]]) -> str:
         for f in formulas
     )
 
-def formula_answer(question: str, formulas: list, multiple: bool = False) -> str:
+def formula_answer(question: str, formulas: list, multiple: bool = False, model: str = "local") -> str:
     formula_context = "\n\n".join([
         f"Formül (Sayfa {f.get('page', '?')}):\n{f.get('text', '')}" 
         for f in formulas
@@ -814,7 +894,7 @@ SORU:
 
 SADECE BAĞLAMA SADIK VE DOĞAL TÜRKÇE İLE AÇIKLA:"""
 
-    return llm_metni(prompt)
+    return llm_metni(prompt, model=model)
 
 # ============================================================
 # PDF VURGULAMA
@@ -1056,10 +1136,10 @@ def soru_sor_sync(istek: SoruIstegi) -> Dict[str, Any]:
 
     if route["formula"]:
         formulas = formula_candidates(profile, question, route)
-        answer = formula_answer(question, formulas, bool(route["all_items"] or formula_multiple_intent(question) or route["last_page"]))
+        answer = formula_answer(question, formulas, bool(route["all_items"] or formula_multiple_intent(question) or route["last_page"]), model=getattr(istek, "model", "local"))
         return {"answer": f"{meta}\n\n{answer}" if meta else answer, "sources": sorted({int(f["page"]) for f in formulas} | set(meta_pages)), "highlighted_file": None, "out_of_context": False}
 
-    special, special_pages = ozel_bolum_yaniti(question, route, profile, chunks)
+    special, special_pages = ozel_bolum_yaniti(question, route, profile, chunks, model=getattr(istek, "model", "local"))
     if special:
         return {"answer": f"{meta}\n\n{special}" if meta else special, "sources": sorted(set(meta_pages + special_pages)), "highlighted_file": None, "out_of_context": False}
 
