@@ -6,6 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.background import BackgroundScheduler
+from arxiv_service import arxiv_gunluk_tara_ve_indir
 import pymupdf as fitz
 import pymupdf4llm
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -37,7 +40,26 @@ except ImportError:
     from langchain_community.embeddings import OllamaEmbeddings
     from langchain_community.llms import Ollama as OllamaLLM
 
-app = FastAPI(title="Akademik Makale Asistanı API", version="2.3")
+scheduler = BackgroundScheduler()
+
+def arka_plan_arxiv_gorevi():
+    # arxiv_service'e yerel_pdf_isle_ve_indeksle fonksiyonumuzu paslıyoruz
+    arxiv_gunluk_tara_ve_indir(process_pdf_func=yerel_pdf_isle_ve_indeksle)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 1. FastAPI başlarken zamanlayıcıyı kur ve başlat (Her gün sabah 08.30'da)
+    scheduler.add_job(arka_plan_arxiv_gorevi, 'cron', hour=8, minute=30)
+    scheduler.start()
+    print("⏰ [FastAPI] Arka plan arXiv zamanlayıcısı devreye girdi (Her gün saat 08:30).", flush=True)
+    
+    yield
+    
+    # 2. FastAPI kapanırken zamanlayıcıyı güvenle durdur
+    scheduler.shutdown()
+    print("🛑 [FastAPI] arXiv zamanlayıcısı durduruldu.", flush=True)
+
+app = FastAPI(title="Akademik Makale Asistanı API", version="2.3", lifespan=lifespan)
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 DB_PATH = BASE_DIR / "qdrant_db"
@@ -1034,28 +1056,49 @@ def soru_sor_sync(istek: SoruIstegi) -> Dict[str, Any]:
         dosya_listesi = [eski_dosya]
     dosya_listesi = list(dict.fromkeys(dosya_listesi))
 
-    if not dosya_listesi:
+    # --- OTO ARXIV ENTEGRASYONU BAŞLANGICI ---
+    # auto_collected_papers içindeki arXiv makalelerini de listeye ekle
+    arxiv_dir = Path("auto_collected_papers").resolve()
+    arxiv_dosyalari = []
+    if arxiv_dir.exists():
+        arxiv_dosyalari = [f.name for f in arxiv_dir.glob("*.pdf")]
+
+    print(f"🔎 [DEBUG] Bulunan arXiv PDF'leri: {arxiv_dosyalari}", flush=True)
+
+    tum_aranacak_dosyalar = list(dict.fromkeys(dosya_listesi + arxiv_dosyalari))
+
+    if not tum_aranacak_dosyalar:
         return {"answer": "Lütfen önce bir PDF makalesi yükleyin.", "sources": [], "highlighted_file": None, "out_of_context": True}
 
     tum_chunks, profiller, aktif_doc_ids = [], [], []
-    for d_adi in dosya_listesi:
+    for d_adi in tum_aranacak_dosyalar:
         guvenli_ad = dosya_guvenli_adi(d_adi)
+        
         p_path = UPLOAD_DIR / guvenli_ad
         if not p_path.exists():
+            p_path = arxiv_dir / guvenli_ad
+            
+        if not p_path.exists():
+            print(f"⚠️ [DEBUG] Dosya diskte bulunamadı: {guvenli_ad}", flush=True)
             continue
+            
         d_id = belge_hashi(p_path)
         if d_id in aktif_doc_ids:
             continue
+            
         profile = json_oku(profil_yolu(guvenli_ad, d_id), {})
         chunks_for_file = json_oku(parca_yolu(guvenli_ad, d_id), [])
+        
         if not profile or not chunks_for_file:
+            print(f"⚠️ [DEBUG] JSON profili veya parçaları boş geldi: {guvenli_ad} (ID: {d_id})", flush=True)
             continue
+            
         aktif_doc_ids.append(d_id)
         profiller.append(profile)
         tum_chunks.extend(chunks_for_file)
 
-    if not profiller or not tum_chunks:
-        return {"answer": "Seçilen makalelerden en az biri için güncel analiz indeksi bulunamadı. Lütfen ilgili PDF'yi yeniden yükleyin.", "sources": [], "highlighted_file": None, "out_of_context": True}
+    print(f"✅ [DEBUG] Toplam taranan aktif dosya sayısı: {len(aktif_doc_ids)}, Toplam chunk: {len(tum_chunks)}", flush=True)
+    # --- OTO ARXIV ENTEGRASYONU BİTİŞİ ---
 
     question = istek.question.strip()
     if not question:
@@ -1197,23 +1240,88 @@ def pdf_sayfalari_ve_parcalari(dosya_yolu, dosya_adi, dosya_id):
         sayfa = doc[sayfa_idx]
         sayfa_no = sayfa_idx + 1
         metin = sayfa.get_text().encode("utf-8", "ignore").decode("utf-8")
-        pages.append({"sayfa": sayfa_no, "metin": metin})
         
-        # Metni yaklaşık 500'er karakterlik bloklara böl
+        # makale_profili 'raw' anahtarını bekliyor:
+        pages.append({
+            "sayfa": sayfa_no,
+            "metin": metin,
+            "raw": metin
+        })
+        
         chunk_boyutu = 500
-        adim = 400  # 100 karakter örtüşme (overlap)
+        adim = 400
         for i in range(0, len(metin), adim):
             parca_metin = metin[i:i + chunk_boyutu].strip()
             if parca_metin:
+                # makale_profili ve Qdrant hem düz hem metadata altındaki alanları bekliyor:
                 chunks.append({
                     "metin": parca_metin,
+                    "text": parca_metin,
                     "sayfa": sayfa_no,
                     "dosya_adi": dosya_adi,
-                    "dosya_id": dosya_id
+                    "dosya_id": dosya_id,
+                    "metadata": {
+                        "section": "İçerik",
+                        "page": sayfa_no,
+                        "dosya_adi": dosya_adi,
+                        "dosya_id": dosya_id
+                    }
                 })
                 
     doc.close()
     return pages, chunks
+
+# YENİ HALİ:
+def yerel_pdf_isle_ve_indeksle(hedef_yol, meta=None):
+    from pathlib import Path
+    hedef_yol = Path(hedef_yol)
+    guvenli_ad = hedef_yol.name
+    
+    d_id = belge_hashi(hedef_yol)
+    profile_path = profil_yolu(guvenli_ad, d_id)
+    chunks_path = parca_yolu(guvenli_ad, d_id)
+    
+    ekstra_meta = meta if isinstance(meta, dict) else {}
+    
+    if not profile_path.exists() or not chunks_path.exists():
+        pages, chunks = pdf_sayfalari_ve_parcalari(hedef_yol, guvenli_ad, d_id)
+        
+        # --- KRİTİK GÜVENLİK FİLTRESİ BAŞLANGICI ---
+        # Diğer fonksiyonlar eksik/farklı format dönse bile burada zorla düzeltiyoruz.
+        for p in pages:
+            if "raw" not in p:
+                p["raw"] = p.get("metin", "")
+                
+        for c in chunks:
+            if "text" not in c:
+                c["text"] = c.get("metin", "")
+            if "metadata" not in c:
+                c["metadata"] = {
+                    "section": "İçerik",
+                    "page": c.get("sayfa", 1),
+                    "dosya_adi": guvenli_ad,
+                    "dosya_id": d_id
+                }
+        # --- KRİTİK GÜVENLİK FİLTRESİ BİTİŞİ ---
+        
+        profile = makale_profili(hedef_yol, pages, chunks, d_id, guvenli_ad)
+        
+        json_yaz(profile_path, profile)
+        json_yaz(chunks_path, chunks)
+        
+        docs = []
+        for c in chunks:
+            docs.append(Document(
+                page_content=c["text"],
+                metadata={**c["metadata"], "kaynak": "arxiv_otomasyon", **ekstra_meta}
+            ))
+            
+        store = get_vector_store(qdrant_client)
+        store.add_documents(docs)
+        print(f"✅ [Qdrant] '{guvenli_ad}' başarıyla veritabanına kaydedildi!", flush=True)
+    else:
+        print(f"ℹ️ [Qdrant] '{guvenli_ad}' zaten daha önce kaydedilmiş.", flush=True)
+
 
 @app.post("/upload")
 async def dosya_yukle(file: UploadFile = File(...)):
@@ -1620,6 +1728,11 @@ async def belge_yukle_stream(file: UploadFile = File(...)):
         finally:
             pass
     return StreamingResponse(ilerleme(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+@app.post("/arxiv/tetikle")
+def arxiv_manuel_tetikle():
+    arka_plan_arxiv_gorevi()
+    return {"durum": "tamamlandi", "mesaj": "arXiv taraması başlatıldı"}
 
 @app.get("/health")
 async def health():

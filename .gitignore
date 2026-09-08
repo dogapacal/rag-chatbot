@@ -21,3 +21,6 @@ paper_profiles/
 article_data/
 frontend/node_modules/
 frontend/dist/
+auto_collected_papers/
+profiller/
+parcalar/
