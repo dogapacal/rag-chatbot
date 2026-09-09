@@ -83,7 +83,7 @@
       <main class="main-chat">
         <div class="messages-container" ref="messagesContainer">
           <div v-if="messages.length<=1 && !isUploading" class="welcome-screen">
-            <div class="welcome-icon">📚🤖</div><h2>Hangi makaleyi analiz etmek istersiniz?</h2><p>Soru sormaya başlamadan önce analiz edilecek PDF makalesini yükleyin.</p>
+            <div class="welcome-icon">📚🤖</div><h2>Makale Asistanına Hoş Geldiniz</h2><p>Hafızadaki arXiv makalelerine doğrudan soru sorabilir veya yeni bir PDF yükleyebilirsiniz.</p>
             <label class="welcome-upload-btn"><input type="file" accept=".pdf" @change="handleFileUpload" multiple hidden />📄 PDF Makale Seç ve Yükle</label>
           </div>
           <div v-if="isUploading" class="message-row bot-row">
@@ -274,7 +274,7 @@ const handleSidebarResize=(event)=>{if(!isSidebarResizing.value)return;sidebarWi
 const stopSidebarResize=()=>{if(!isSidebarResizing.value)return;isSidebarResizing.value=false;document.body.style.cursor='';window.removeEventListener('pointermove',handleSidebarResize);window.removeEventListener('pointerup',stopSidebarResize);window.removeEventListener('pointercancel',stopSidebarResize)}
 const syncHistory=()=>localStorage.setItem(STORAGE_KEY_HISTORY,JSON.stringify(chatHistory.value))
 
-const startNewChat=()=>{currentChatId.value=Date.now();activeFiles.value = []; closePdf();editingChatId.value=null;editTitleText.value='';activePdfPage.value=1;activeHighlightFile.value=null;activeSearchFile.value=null;messages.value=[{sender:'bot',text:'Yeni bir oturum açıldı. PDF makalenizi yükleyerek başlayabilirsiniz.'}]}
+const startNewChat=()=>{currentChatId.value=Date.now();activeFiles.value = []; closePdf();editingChatId.value=null;editTitleText.value='';activePdfPage.value=1;activeHighlightFile.value=null;activeSearchFile.value=null;messages.value=[{sender:'bot',text:'Yeni bir oturum açıldı. Hafızadaki makalelere hemen soru sorabilir veya yeni PDF yükleyebilirsiniz.'}]}
 
 const loadChat=async(chat)=>{currentChatId.value=chat.id;messages.value=chat.messages||[];activeFiles.value = chat.files ? chat.files : (chat.fileName ? [chat.fileName] : []);activePdfPage.value=1;activeHighlightFile.value=null;activeSearchFile.value=null;await clearSearch(false);editingChatId.value=null;if(activeFileName.value)await refreshPdfViewer();else closePdf()}
 const deleteChat=(chatId)=>{chatHistory.value=chatHistory.value.filter(chat=>chat.id!==chatId);syncHistory();if(currentChatId.value===chatId)startNewChat()}
@@ -425,7 +425,6 @@ const stopResponse=()=>{if(abortController.value)abortController.value.abort();a
 const sendMessage=async()=>{
   const query=userInput.value.trim()
   if(!query||isThinking.value)return
-  if(activeFiles.value.length === 0){messages.value.push({sender:'user',text:query});messages.value.push({sender:'bot',text:'❌ Önce analiz etmek istediğiniz PDF makalesini yükleyin.',out_of_context:true});userInput.value='';await scrollToBottom();return}
   messages.value.push({sender:'user',text:query});userInput.value='';isThinking.value=true;currentLiveThoughts.value='Makale taranıyor...';saveCurrentChat();await scrollToBottom()
   if(abortController.value)abortController.value.abort()
   abortController.value=new AbortController()

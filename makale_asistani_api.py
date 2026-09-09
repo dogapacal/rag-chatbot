@@ -588,6 +588,7 @@ Kurallar:
 - Yazar adlarını, makale başlığını, özel isimleri, sayıları, formülleri, değişkenleri ve kaynak künyelerini değiştirme.
 - [s. X] kaynak etiketlerini koru.
 - Yeni bilgi ekleme.
+- EK KURAL: 'Saldırgın başarı oranı' gibi bozuk/mekanik çeviriler yerine 'Saldırı başarı oranı (ASR)' gibi mühendislikte yerleşik doğal Türkçe terimler kullan.
 
 SORU:
 {question}
@@ -607,7 +608,7 @@ def answer_from_evidence(question: str, context: str, task: str = "", model: str
 
 TEMEL YAZIM PRENSİPLERİ (HER ALAN İÇİN GEÇERLİ):
 1. KESİNLİKLE TÜRKÇE YANIT VER: Makale metni İngilizce olsa dahi, cevabının tamamını Türkçe yaz. İngilizce cümle kurma.
-2. ÇEVİRİ DEĞİL, ANLATIM YAP: Verilen İngilizce parçaları kelime kelime çevirmeye çalışma. Önce teknik mantığı anla, ardından bir mühendisin ekip arkadaşına anlatacağı gibi doğal, modern ve akıcı bir Türkçe ile ifade et.
+2. ÇEVİRİ DEĞİL, ANLATIM YAP: Verilen İngilizce parçaları kelime kelime çevirmeye çalışma. Önce teknik mantığı anla, ardından bir mühendisin ekip arkadaşına anlatacağı gibi doğal, modern ve akıcı bir Türkçe ile ifade et. (Örn: 'Attack success rate' için 'saldırgın başarı' değil 'saldırı başarı oranı (ASR)' kullan).
 3. DİL VE TERİM STANDARDI:
    - Eski, ağdalı veya yapay sözlük karşılıkları yerine modern mühendislikte kullanılan yalın karşılıkları seç.
    - Türkçede doğal karşılığı olmayan teknik terimleri ('watershed', 'convolution', 'transformer' vb.) doğrudan kullanabilirsin.
@@ -634,12 +635,13 @@ CEVAP (TÜRKÇE):"""
         
     # Model İngilizceye kaçtıysa Türkçeye zorla
     return turkce_cevap_duzelt(
-    question,
-    context,
-    draft,
-    force=False,
-    model=model
-)
+        question,
+        context,
+        draft,
+        force=False,
+        model=model
+    )
+
 def multi_document_answer(question: str, context: str, task: str = "", model: str = "local") -> str:
     prompt = f"""Sen birden fazla akademik makaleyi birlikte analiz eden araştırma asistanısın.
 
@@ -648,11 +650,13 @@ Kurallar:
 - Teknik terimleri, özel isimleri, kısaltmaları, formülleri, değişkenleri ve sayıları değiştirme.
 - Yalnızca verilen makale bağlamlarını kullan; dış bilgi ekleme.
 - Her önemli bilginin hangi makaleden geldiğini açıkça belirt.
-- Karşılaştırmada makaleleri ayrı ayrı değerlendir, ardından benzerlik ve farklılıkları belirt.
+- TEKRARDAN KAÇIN: Konu, amaç, yöntem ve sonuç başlıklarında aynı cümleleri veya benzer ifadeleri asla tekrarlama.
+- SOMUT DETAY VER: 'Etkili bir yöntemdir', 'başarılı sonuçlar elde edilmiştir' gibi içi boş kalıplar yerine; yöntemde kullanılan somut algoritma/mimarinin adını, sonuçta ise net metrikleri (oran, F1 skoru, yüzde vb.) veya ulaşılan somut teknik çıktıyı yaz.
+- Karşılaştırmada makaleleri ayrı ayrı değerlendir, ardından benzerlik ve farklılıkları somut kriterlerle belirt.
 - Sentezde makalelerdeki bilgileri ortak bir değerlendirmede birleştir.
 - Çelişki varsa açıkça belirt.
 - Makul çıkarımları yalnızca verilen bilgilerden yap.
-- Kaynak etiketlerini [Dosya: X | s. Y] biçiminde koru.
+- Kaynak etiketlerini [Dosya: X | s. Y] veya [Makale: X | s. Y] biçiminde koru.
 - Yeterli kanıt yoksa bunu belirt.
 
 EK GÖREV:
@@ -669,12 +673,12 @@ SADECE TÜRKÇE CEVAP VER."""
     if not draft:
         return "Verilen makalelerden geçerli bir karşılaştırma veya sentez üretilemedi."
     return turkce_cevap_duzelt(
-    question,
-    context,
-    draft,
-    force=True,
-    model=model
-)
+        question,
+        context,
+        draft,
+        force=True,
+        model=model
+    )
 
 # ============================================================
 # METADATA
@@ -1110,6 +1114,16 @@ def soru_sor_sync(istek: SoruIstegi) -> Dict[str, Any]:
 
     # Birden fazla PDF aktifse bütün sorular belge bazlı ortak bağlamdan cevaplanır.
     if len(profiller) > 1:
+        # Kullanıcı "X. makale" dediğinde o makaleye odaklan
+        import re
+        m_sira = re.search(r'(\d+)\.\s*makale', question.lower())
+        if m_sira:
+            idx = int(m_sira.group(1)) - 1
+            if 0 <= idx < len(profiller):
+                secili_profil = profiller[idx]
+                secili_chunks = [c for c in chunks if c.get("dosya_id") == secili_profil.get("dosya_id") or c.get("dosya_adi") == secili_profil.get("dosya_adi")]
+                profiller = [secili_profil]
+                chunks = secili_chunks
         if route["metadata"]:
             lines, meta_pages = [], []
             for item in profiller:
@@ -1135,18 +1149,35 @@ def soru_sor_sync(istek: SoruIstegi) -> Dict[str, Any]:
             if formula_parts:
                 return {"answer": "\n\n".join(formula_parts), "sources": sorted(set(formula_pages)), "highlighted_file": None, "out_of_context": False}
 
-        multi_context, multi_pages = multi_document_context(profiller, chunks, max_chars=10000)
-        selected = retrieve_hybrid(get_vector_store(qdrant_client), profile, chunks, question, route, aktif_doc_ids)
-        retrieval_context = context_from_chunks(selected, per_chunk=1600) if selected else ""
+        # Tüm kütüphaneden soruyla en alakalı 10 parçayı derinlemesine çek
+        # Qdrant doc_id filtresine takılmadan eldeki tüm chunks havuzundan en alakalı parçaları çek
+        # Türkçe sorudan İngilizce akademik anahtar kelimeler türet
+        en_prompt = f"Convert this research question into 5-8 English academic search terms. Return ONLY the English keywords separated by space, no other text:\n{question}"
+        en_terms_str = llm_metni(en_prompt, model="local") or ""
+        print(f"🔍 [DEBUG] Üretilen İngilizce Arama Terimleri: {en_terms_str}")
 
-        if retrieval_context:
-            context = retrieval_context
-        else:
-            context = multi_context
+        # Hem kullanıcının yazdığı terimleri hem de İngilizce karşılıklarını birleştir
+        all_terms = [t.strip().lower() for t in f"{question} {en_terms_str}".split() if len(t.strip()) > 2]
 
-        article_intent = route["multi_document"] or any(route[k] for k in ("metadata", "abstract", "intro_first", "summary", "conclusion", "formula", "theory", "references", "methods", "results", "limitations", "dataset", "contribution"))
-        if not article_intent and not soru_makale_ile_ilgili_mi(question, context):
-            return {"answer": "Seçilen makalelerde bu bilgi bulunamadı.", "sources": [], "highlighted_file": None, "out_of_context": True}
+        scored = []
+        for c in chunks:
+            txt = c.get("text", "").lower()
+            # İngilizce terimler makale metninde geçiyor mu kontrol et ve puanla
+            score = sum(txt.count(t) for t in all_terms)
+            if score > 0:
+                scored.append((score, c))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        selected = [c for _, c in scored[:10]]
+
+        print(f"🔥 [DEBUG] Eşleşen gerçek parça sayısı: {len(selected)}")
+        context = context_from_chunks(selected, per_chunk=2500) if selected else ""
+        multi_pages = sorted({int(c["metadata"]["page"]) for c in selected}) if selected else []
+
+        # Katı bloklama kaldırıldı; kararı LLM'e devrediyoruz
+        known_intent = route["multi_document"] or any(route[k] for k in ("metadata", "abstract", "intro_first", "summary", "conclusion", "formula", "theory", "references", "methods", "results", "limitations", "dataset", "contribution"))
+        if not known_intent and not soru_makale_ile_ilgili_mi(question, context):
+            pass
 
         tasks = []
         if route["comparison"]:
