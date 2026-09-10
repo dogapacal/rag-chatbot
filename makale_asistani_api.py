@@ -1,10 +1,12 @@
 """İki dilli, yapısal akademik makale asistanı API'si."""
 from __future__ import annotations
+from datetime import datetime
 import asyncio, hashlib, json, os, re, shutil, time, unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+import requests
 
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -20,6 +22,10 @@ from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, FieldCondition, Filter, MatchAny, MatchValue, VectorParams
 from openai import OpenAI
+
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import smtplib
 
 # --- .env Dosyasını Okuma ve API Anahtarını Yükleme ---
 from dotenv import load_dotenv
@@ -40,22 +46,197 @@ except ImportError:
     from langchain_community.embeddings import OllamaEmbeddings
     from langchain_community.llms import Ollama as OllamaLLM
 
+METADATA_FILE = "indirilen_makaleler.json"
+
+def metadata_kaydet(arxiv_id, title, category, abstract_text):
+    kayitlar = []
+    if os.path.exists(METADATA_FILE):
+        try:
+            with open(METADATA_FILE, "r", encoding="utf-8") as f:
+                kayitlar = json.load(f)
+        except Exception:
+            kayitlar = []
+            
+    kayitlar.append({
+        "arxiv_id": arxiv_id,
+        "title": title,
+        "category": category,
+        "abstract": abstract_text,
+        "download_date": datetime.now().strftime("%Y-%m-%d")
+    })
+    
+    with open(METADATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(kayitlar, f, ensure_ascii=False, indent=2)
+
+
+def abstract_turkcelestir(abstract_metni: str) -> str:
+    """OpenRouter API kullanarak İngilizce abstract'ı Türkçe'ye çevirir."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    
+    # "sk-or-v1" ile başlayan anahtarını buraya yapıştır
+    headers = {
+        "Authorization": "Bearer apikey-burayayazma",
+        "Content-Type": "application/json"
+    }
+    
+    # Hata vermemesi için :free takısını kaldırdık (OpenRouter'ın hata mesajındaki önerisine göre)
+    model_adi = "meta-llama/llama-3.1-8b-instruct"
+
+    system_instruction = (
+        "Sen yapay zeka, bilgisayar ve yazılım alanında uzman kıdemli bir araştırma mühendisisin. "
+        "Görevin, sana verilen İngilizce akademik makale özetini (abstract) mühendislik bakış açısıyla, "
+        "anlamsal doğruluğu koruyarak Türkçe özetlemektir.\n\n"
+        "GENEL KURALLAR:\n"
+        "1. Asla sözlük/kelime çevirisi (motamot) yapma. Cümleleri Türkçe dil bilgisine uygun, "
+        "devrik olmayan, akıcı ve profesyonel bir teknik dille baştan kur.\n"
+        "2. Bilgisayar bilimleri ve yapay zeka literatüründeki yerleşik teknik terimleri, model, "
+        "algoritma, donanım, metrik ve mimari adlarını (örn. pipeline, fine-tuning, benchmark, "
+        "latency, throughput, cache, AST/CFG, embedding, tokenization, checkpoint, framework, "
+        "offloading, backpropagation, attention vb.) KESİNLİKLE zorlama Türkçe karşılıklarla "
+        "çevirme; orijinal İngilizce halleriyle kullan.\n"
+        "3. İngilizce kelimeleri bağlamından koparıp absürt çeviriler üretme; terim teknik jargonda "
+        "nasıl yer bulduysa o bağlamı koru.\n"
+        "4. Her makale özeti şu 3 temel yapıyı açık ve net bir şekilde aktarmalıdır:\n"
+        "   - Problem/Amaç: Çözülmek istenen temel mühendislik/araştırma sorunu nedir?\n"
+        "   - Yöntem/Mimari: Önerilen sistem, model veya mekanizma nasıl çalışıyor?\n"
+        "   - Sonuç/Katkı: Deneysel sonuçlar, başarım artışı veya elde edilen temel bulgu nedir?\n"
+        "5. Giriş/çıkış nezaket ifadeleri ekleme; doğrudan özet metnini ver."
+    )
+    
+    
+    data = {
+        "model": model_adi,
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": abstract_metni}
+        ],
+        "temperature": 0.3,          # Modele biraz esneklik verir, katı robottan kurtarır
+        "frequency_penalty": 0.1,    # BURASI KRİTİK: Model aynı kelimeyi tekrar ederse ona ceza puanı verir, böylece döngüden zorla çıkarır
+        "max_tokens": 500            # Her ihtimale karşı metin çok uzarsa otomatik keser
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=120)
+        
+        if response.status_code == 200:
+            yanit_json = response.json()
+            if "choices" in yanit_json and len(yanit_json["choices"]) > 0:
+                return yanit_json["choices"][0]["message"]["content"].strip()
+            return "API'den boş yanıt döndü."
+        else:
+            return f"Bulut API Hatası ({response.status_code}): {response.text}"
+            
+    except Exception as e:
+        print(f"⚠️ OpenRouter API Hatası: {e}")
+        return f"Çeviri yapılamadı. Hata: {str(e)}" 
+
+PDF_DIR = Path(r"C:\Users\DOĞA\Desktop\BAŞARI MOBİLE\basari_chatbot\auto_collected_papers")
+
+def pdf_bilgi_cikar(pdf_yolu: Path) -> Tuple[str, str]:
+    """PDF'in ilk sayfasından başlık ve abstract kısmını ayıklar."""
+    try:
+        doc = fitz.open(pdf_yolu)
+        ilk_sayfa = doc[0].get_text("text")
+        doc.close()
+
+        satirlar = [s.strip() for s in ilk_sayfa.split("\n") if s.strip()]
+        
+        # arXiv filigranını/damgasını (header) atla ve gerçek başlığı bul
+        baslik = pdf_yolu.stem
+        for s in satirlar:
+            if re.match(r"^arxiv:\d{4}\.\d+", s, re.IGNORECASE):
+                continue
+            baslik = s
+            break
+
+        abstract = ""
+        match = re.search(r"(?i)abstract[\s\.:\n—-]*(.*?)(?=\n\s*(?:1[\.\s]|I[\.\s]|introduction|keywords))", ilk_sayfa, re.DOTALL)
+        if match:
+            abstract = match.group(1).replace("\n", " ").strip()
+        else:
+            abstract = " ".join(satirlar[1:15])
+
+        return baslik, abstract
+    except Exception as e:
+        print(f"⚠️ PDF okuma hatası ({pdf_yolu.name}): {e}")
+        return pdf_yolu.stem, ""
+
+def gunluk_ozet_hazirla(scope: str = "today"):
+    bugun_str = datetime.now().strftime("%Y-%m-%d")
+    if not PDF_DIR.exists():
+        return None
+
+    secilen_pdfler = []
+    for p in PDF_DIR.glob("*.pdf"):
+        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d")
+        if scope == "all" or mtime == bugun_str:
+            secilen_pdfler.append(p)
+
+    if not secilen_pdfler:
+        return None
+
+    mesaj_parcalari = [f"{'GÜNLÜK' if scope == 'today' else 'TÜM KÜTÜPHANE'} AKADEMİK LİTERATÜR RAPORU\n"]
+    for idx, pdf_yolu in enumerate(secilen_pdfler, 1):
+        arxiv_id = pdf_yolu.stem.replace("v1", "").replace("v2", "")
+        baslik, ham_abstract = pdf_bilgi_cikar(pdf_yolu)
+        turkce_ozet = abstract_turkcelestir(ham_abstract) if ham_abstract else "Özet metni ayıklanamadı."
+        
+        mesaj_parcalari.append(
+            f"{idx}. {baslik}\nÖzet: {turkce_ozet}\nLink: https://arxiv.org/abs/{arxiv_id}\n"
+        )
+
+    return "\n\n".join(mesaj_parcalari)
+
+def email_ozet_gonder(ozet_metni: str):
+    """Hazırlanan özeti Gmail üzerinden e-posta olarak iletir."""
+    if not ozet_metni:
+        return False
+
+    gonderici_email = "dogapacal06@gmail.com"
+    alici_email = "doga.kousat@gmail.com"
+    uygulama_sifresi = "otkxffecwxgeygsm"  # Google'dan aldığın 16 haneli kod (boşluksuz)
+
+    mesaj = MIMEMultipart()
+    mesaj["From"] = f"Makale Asistanı <{gonderici_email}>"
+    mesaj["To"] = alici_email
+    mesaj["Subject"] = f"Günün Akademik Makale Özeti - {datetime.now().strftime('%d.%m.%Y')}"
+
+    mesaj.attach(MIMEText(ozet_metni, "plain", "utf-8"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(gonderici_email, uygulama_sifresi)
+            server.send_message(mesaj)
+        print("✅ Günlük özet e-postası başarıyla gönderildi.", flush=True)
+        return True
+    except Exception as e:
+        print(f"❌ E-posta gönderim hatası: {e}", flush=True)
+        return False
+
 scheduler = BackgroundScheduler()
 
 def arka_plan_arxiv_gorevi():
-    # arxiv_service'e yerel_pdf_isle_ve_indeksle fonksiyonumuzu paslıyoruz
-    arxiv_gunluk_tara_ve_indir(process_pdf_func=yerel_pdf_isle_ve_indeksle)
+    arxiv_gunluk_tara_ve_indir(
+        process_pdf_func=yerel_pdf_isle_ve_indeksle,
+        metadata_func=metadata_kaydet
+    )
+
+def arka_plan_ozet_ve_bildirim_gorevi():
+    """09:15'te çalışır: Özetleri derler ve e-posta ile gönderir."""
+    print("⏰ [09:15 Görevi] Günlük özet derleme ve e-posta bildirimi başlatıldı...", flush=True)
+    rapor = gunluk_ozet_hazirla()
+    if rapor:
+        email_ozet_gonder(rapor)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. FastAPI başlarken zamanlayıcıyı kur ve başlat (Her gün sabah 08.30'da)
     scheduler.add_job(arka_plan_arxiv_gorevi, 'cron', hour=8, minute=30)
+    scheduler.add_job(arka_plan_ozet_ve_bildirim_gorevi, 'cron', hour=9, minute=15)
     scheduler.start()
-    print("⏰ [FastAPI] Arka plan arXiv zamanlayıcısı devreye girdi (Her gün saat 08:30).", flush=True)
+    print("⏰ [FastAPI] Arka plan arXiv (08:30) ve E-posta Bildirim (09:15) zamanlayıcıları devrede.", flush=True)
     
     yield
     
-    # 2. FastAPI kapanırken zamanlayıcıyı güvenle durdur
     scheduler.shutdown()
     print("🛑 [FastAPI] arXiv zamanlayıcısı durduruldu.", flush=True)
 
@@ -1054,6 +1235,44 @@ async def pdf_search_advanced(istek: SoruIstegi):
 # ============================================================
 
 def soru_sor_sync(istek: SoruIstegi) -> Dict[str, Any]:
+    # --- GENEL KÜTÜPHANE / GÜNLÜK RAPOR YAKALAYICI ---
+    soru_ham = getattr(istek, "soru", None) or getattr(istek, "query", "") or ""
+    soru_kucuk = soru_ham.lower().strip()
+
+    # 1. "Bugün" odaklı sorgular
+    bugun_tetikleyiciler = [
+        "bugün inen", "bugünkü makaleler", "bugün gelen", "günün makaleleri"
+    ]
+    # 2. "Tüm arşiv / kütüphane" odaklı sorgular
+    genel_tetikleyiciler = [
+        "kütüphanedeki makaleleri", "kütüphaneyi özetle", "tüm makaleleri özetle",
+        "makaleleri özetle", "arşivdeki makaleler", "kütüphanede ne var", "hangi makaleler var"
+    ]
+
+    secilen_scope = None
+    if any(t in soru_kucuk for t in bugun_tetikleyiciler):
+        secilen_scope = "today"
+    elif any(t in soru_kucuk for t in genel_tetikleyiciler):
+        secilen_scope = "all"
+
+    if secilen_scope:
+        arsiv_ozeti = gunluk_ozet_hazirla(scope=secilen_scope)
+        if arsiv_ozeti:
+            baslik_etiketi = "Bugünün Makaleleri" if secilen_scope == "today" else "Tüm Kütüphane Arşivi"
+            return {
+                "answer": f"📚 **{baslik_etiketi} Özeti:**\n\n{arsiv_ozeti}",
+                "sources": [],
+                "highlighted_file": None,
+                "out_of_context": False
+            }
+        return {
+            "answer": "Belirtilen kritere uygun makale bulunamadı.",
+            "sources": [],
+            "highlighted_file": None,
+            "out_of_context": True
+        }
+    # ------------------------------------------------
+    
     dosya_listesi = list(getattr(istek, "dosya_adlari", []) or [])
     eski_dosya = getattr(istek, "dosya_adi", None)
     if not dosya_listesi and eski_dosya:
@@ -1261,7 +1480,6 @@ def soru_sor_sync(istek: SoruIstegi) -> Dict[str, Any]:
         "highlighted_file": highlighted_pdf(hedef_dosya, selected, getattr(istek, "theme_color", "#2563EB")), 
         "out_of_context": is_out_of_context
     }
-
 def pdf_sayfalari_ve_parcalari(dosya_yolu, dosya_adi, dosya_id):
     doc = fitz.open(str(dosya_yolu))
     pages = []

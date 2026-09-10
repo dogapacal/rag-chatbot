@@ -14,7 +14,7 @@ HEDEF_KONULAR = [
     'all:"model quantization" OR all:"local llm"'
 ]
 
-def arxiv_gunluk_tara_ve_indir(process_pdf_func=None):
+def arxiv_gunluk_tara_ve_indir(process_pdf_func=None, metadata_func=None):
     """
     Belirlenen konularda en son çıkan makaleleri tarar,
     yeni olanları indirir ve varsa RAG boru hattına gönderir.
@@ -52,6 +52,8 @@ def arxiv_gunluk_tara_ve_indir(process_pdf_func=None):
             for entry in entries:
                 makale_id = entry.find('atom:id', ns).text.strip()
                 baslik = entry.find('atom:title', ns).text.strip().replace('\n', ' ')
+                ozet_alani = entry.find('atom:summary', ns)
+                ozet_metni = ozet_alani.text.strip().replace('\n', ' ') if ozet_alani is not None else ""
 
                 if makale_id in INDIRILEN_MAKALELER:
                     print(f"  ℹ️ Zaten kayıtlı: {baslik[:35]}...", flush=True)
@@ -80,6 +82,12 @@ def arxiv_gunluk_tara_ve_indir(process_pdf_func=None):
                             process_pdf_func(dosya_yolu, meta={"kaynak": "arxiv_otomasyon", "baslik": baslik})
                         except Exception as q_err:
                             print(f"  ⚠️ Qdrant kayıt hatası ({temiz_id}): {q_err}", flush=True)
+
+                    if metadata_func:
+                        try:
+                            metadata_func(temiz_id, baslik, konu, ozet_metni)
+                        except Exception as m_err:
+                            print(f"  ⚠️ Metadata kayıt hatası ({temiz_id}): {m_err}", flush=True)
 
         except Exception as e:
             print(f"  ❌ Hata ({konu}): {e}", flush=True)
